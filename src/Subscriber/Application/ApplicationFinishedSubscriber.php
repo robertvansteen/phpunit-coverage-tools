@@ -11,8 +11,11 @@ use RobinIngelbrecht\PHPUnitCoverageTools\ConsoleOutput;
 use RobinIngelbrecht\PHPUnitCoverageTools\Exitter;
 use RobinIngelbrecht\PHPUnitCoverageTools\MinCoverage\CoverageMetric;
 use RobinIngelbrecht\PHPUnitCoverageTools\MinCoverage\MinCoverageResult;
+use RobinIngelbrecht\PHPUnitCoverageTools\MinCoverage\MinCoverageRule;
 use RobinIngelbrecht\PHPUnitCoverageTools\MinCoverage\MinCoverageRules;
 use RobinIngelbrecht\PHPUnitCoverageTools\MinCoverage\ResultStatus;
+use RobinIngelbrecht\PHPUnitCoverageTools\Timer\SystemTimer;
+use RobinIngelbrecht\PHPUnitCoverageTools\Timer\Timer;
 use Symfony\Component\Console\Helper\FormatterHelper;
 
 final class ApplicationFinishedSubscriber extends FormatterHelper implements FinishedSubscriber
@@ -20,15 +23,16 @@ final class ApplicationFinishedSubscriber extends FormatterHelper implements Fin
     public function __construct(
         private readonly string $relativePathToCloverXml,
         private readonly MinCoverageRules $minCoverageRules,
-        private readonly bool $exitOnLowCoverage,
         private readonly bool $cleanUpCloverXml,
         private readonly Exitter $exitter,
         private readonly ConsoleOutput $consoleOutput,
+        private readonly Timer $timer,
     ) {
     }
 
     public function notify(Finished $event): void
     {
+        $this->timer->start();
         /** @var string $reflectionFileName */
         $reflectionFileName = (new \ReflectionClass(ClassLoader::class))->getFileName();
         $absolutePathToCloverXml = dirname($reflectionFileName, 3).'/'.$this->relativePathToCloverXml;
@@ -48,7 +52,10 @@ final class ApplicationFinishedSubscriber extends FormatterHelper implements Fin
             if ($this->minCoverageRules->hasTotalRule() && \XMLReader::ELEMENT == $reader->nodeType && 'metrics' == $reader->name && 2 === $reader->depth) {
                 /** @var \SimpleXMLElement $node */
                 $node = simplexml_load_string($reader->readOuterXml());
-                $metricTotal = CoverageMetric::fromCloverXmlNode($node, MinCoverageRules::TOTAL);
+                $metricTotal = CoverageMetric::fromCloverXmlNode(
+                    node: $node,
+                    forClass: MinCoverageRule::TOTAL
+                );
                 continue;
             }
             if ($this->minCoverageRules->hasOtherRulesThanTotalRule() && \XMLReader::ELEMENT == $reader->nodeType && 'class' == $reader->name && 3 === $reader->depth) {
@@ -56,7 +63,10 @@ final class ApplicationFinishedSubscriber extends FormatterHelper implements Fin
                 $node = simplexml_load_string($reader->readInnerXml());
                 /** @var string $className */
                 $className = $reader->getAttribute('name');
-                $metrics[] = CoverageMetric::fromCloverXmlNode($node, $className);
+                $metrics[] = CoverageMetric::fromCloverXmlNode(
+                    node: $node,
+                    forClass: $className
+                );
             }
         }
         $reader->close();
@@ -74,12 +84,18 @@ final class ApplicationFinishedSubscriber extends FormatterHelper implements Fin
             metrics: $metrics,
             metricTotal: $metricTotal,
         );
-        $finalStatus = array_values($results)[0]->getStatus();
 
-        $this->consoleOutput->print($results, $finalStatus);
+        $this->consoleOutput->print(
+            results: $results,
+            duration: $this->timer->stop()
+        );
 
-        if ($this->exitOnLowCoverage && ResultStatus::FAILED === $finalStatus) {
-            $this->exitter->exit(1);
+        $needsExit = !empty(array_filter(
+            $results,
+            fn (MinCoverageResult $minCoverageResult) => $minCoverageResult->exitOnLowCoverage() && ResultStatus::FAILED === $minCoverageResult->getStatus())
+        );
+        if ($needsExit) {
+            $this->exitter->exit();
         }
     }
 
@@ -103,7 +119,10 @@ final class ApplicationFinishedSubscriber extends FormatterHelper implements Fin
 
             try {
                 if (preg_match('/--min-coverage=(?<minCoverage>[\d]+)/', $arg, $matches)) {
-                    $rules = MinCoverageRules::fromInt((int) $matches['minCoverage']);
+                    $rules = MinCoverageRules::fromInt(
+                        minCoverage: (int) $matches['minCoverage'],
+                        exitOnLowCoverage: $parameters->has('exitOnLowCoverage') && (int) $parameters->get('exitOnLowCoverage')
+                    );
                     break;
                 }
 
@@ -127,10 +146,10 @@ final class ApplicationFinishedSubscriber extends FormatterHelper implements Fin
         return new self(
             relativePathToCloverXml: $configuration->coverageClover(),
             minCoverageRules: $rules,
-            exitOnLowCoverage: $parameters->has('exitOnLowCoverage') && (int) $parameters->get('exitOnLowCoverage'),
             cleanUpCloverXml: $cleanUpCloverXml,
             exitter: new Exitter(),
-            consoleOutput: new ConsoleOutput(new \Symfony\Component\Console\Output\ConsoleOutput()),
+            consoleOutput: ConsoleOutput::create(),
+            timer: SystemTimer::create(),
         );
     }
 }

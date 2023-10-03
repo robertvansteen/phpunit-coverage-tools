@@ -2,10 +2,13 @@
 
 namespace RobinIngelbrecht\PHPUnitCoverageTools;
 
+/**
+ * @codeCoverageIgnore
+ */
 class Exitter
 {
-    public function exit(int $code): void
+    public function exit(): void
     {
-        exit($code);
+        exit(1);
     }
 }
